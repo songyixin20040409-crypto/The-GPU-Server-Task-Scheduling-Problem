@@ -56,6 +56,10 @@ struct ScoreWeight {
     long long resourceW;
 };
 
+long double localObjective(const Metrics& m, long double waitW, long double idleW, long double finishW) {
+    return (long double)m.wait * waitW + (long double)m.idleMem * idleW + (long double)m.finish * finishW;
+}
+
 int M, N;
 vector<Server> servers;
 vector<Task> tasks;
@@ -273,6 +277,129 @@ Plan buildPlan(vector<int> order, const ScoreWeight& w) {
     return plan;
 }
 
+vector<vector<RunningJob>> buildJobsFromAnswer(const vector<Answer>& ans) {
+    vector<vector<RunningJob>> serverJobs(M + 1);
+
+    for (int i = 1; i <= N; i++) {
+        const Answer& a = ans[i];
+        serverJobs[a.serverId].push_back({
+            i,
+            a.startTime,
+            a.finishTime,
+            a.useGpu,
+            tasks[i].needCpu,
+            tasks[i].needMem,
+            tasks[i].needGpuMem
+        });
+    }
+
+    return serverJobs;
+}
+
+void removeTaskFromJobs(vector<RunningJob>& jobs, int taskId) {
+    for (int i = 0; i < (int)jobs.size(); i++) {
+        if (jobs[i].taskId == taskId) {
+            jobs.erase(jobs.begin() + i);
+            return;
+        }
+    }
+}
+
+Plan improveByReinsert(const Plan& basePlan, long double waitW, long double idleW, long double finishW) {
+    Plan bestPlan = basePlan;
+    vector<Answer> ans = basePlan.ans;
+    Metrics currentMetrics = basePlan.metrics;
+    long double currentValue = localObjective(currentMetrics, waitW, idleW, finishW);
+
+    int rounds = 1;
+    for (int round = 0; round < rounds; round++) {
+        bool changed = false;
+        vector<vector<RunningJob>> serverJobs = buildJobsFromAnswer(ans);
+
+        vector<int> order;
+        for (int i = 1; i <= N; i++) {
+            order.push_back(i);
+        }
+
+        sort(order.begin(), order.end(), [&](int a, int b) {
+            long long waitA = 1LL * tasks[a].priority * (ans[a].startTime - tasks[a].submitTime);
+            long long waitB = 1LL * tasks[b].priority * (ans[b].startTime - tasks[b].submitTime);
+            if (waitA != waitB) return waitA > waitB;
+            if (ans[a].finishTime != ans[b].finishTime) return ans[a].finishTime > ans[b].finishTime;
+            return tasks[a].priority > tasks[b].priority;
+        });
+
+        int limit = min(N, 40);
+        for (int pos = 0; pos < limit; pos++) {
+            int taskId = order[pos];
+            Answer oldAnswer = ans[taskId];
+            removeTaskFromJobs(serverJobs[oldAnswer.serverId], taskId);
+
+            Answer bestAnswer = oldAnswer;
+            Metrics bestMetrics = currentMetrics;
+            long double bestValue = currentValue;
+
+            for (int s = 1; s <= M; s++) {
+                if (!canRunOnServer(tasks[taskId], servers[s])) continue;
+
+                int useGpu = calcNeedGpu(tasks[taskId], servers[s]);
+                vector<int> candidateTimes = getCandidateStartTimes(tasks[taskId], serverJobs[s]);
+
+                for (int p = 0; p < (int)candidateTimes.size(); p++) {
+                    int startTime = candidateTimes[p];
+                    if (!canPlaceAtTime(tasks[taskId], servers[s], serverJobs[s], startTime, useGpu)) {
+                        continue;
+                    }
+
+                    int finishTime = startTime + tasks[taskId].runTime;
+                    if (startTime == oldAnswer.startTime &&
+                        finishTime == oldAnswer.finishTime &&
+                        s == oldAnswer.serverId &&
+                        useGpu == oldAnswer.useGpu) {
+                        continue;
+                    }
+
+                    vector<Answer> trialAns = ans;
+                    trialAns[taskId] = {taskId, s, startTime, useGpu, finishTime};
+                    Metrics trialMetrics = evaluatePlan(trialAns);
+                    long double trialValue = localObjective(trialMetrics, waitW, idleW, finishW);
+
+                    if (trialValue + 1e-9L < bestValue) {
+                        bestValue = trialValue;
+                        bestMetrics = trialMetrics;
+                        bestAnswer = trialAns[taskId];
+                    }
+                }
+            }
+
+            ans[taskId] = bestAnswer;
+            serverJobs[bestAnswer.serverId].push_back({
+                taskId,
+                bestAnswer.startTime,
+                bestAnswer.finishTime,
+                bestAnswer.useGpu,
+                tasks[taskId].needCpu,
+                tasks[taskId].needMem,
+                tasks[taskId].needGpuMem
+            });
+
+            if (bestAnswer.serverId != oldAnswer.serverId ||
+                bestAnswer.startTime != oldAnswer.startTime ||
+                bestAnswer.useGpu != oldAnswer.useGpu) {
+                currentMetrics = bestMetrics;
+                currentValue = bestValue;
+                changed = true;
+            }
+        }
+
+        if (!changed) break;
+    }
+
+    bestPlan.ans = ans;
+    bestPlan.metrics = evaluatePlan(ans);
+    return bestPlan;
+}
+
 vector<vector<int>> makeOrders() {
     vector<vector<int>> orders;
     vector<int> base;
@@ -331,6 +458,36 @@ vector<vector<int>> makeOrders() {
         return tasks[a].priority > tasks[b].priority;
     });
 
+    addOrder([&](int a, int b) {
+        long long lhs = 1LL * tasks[a].priority * tasks[b].runTime;
+        long long rhs = 1LL * tasks[b].priority * tasks[a].runTime;
+        if (lhs != rhs) return lhs > rhs;
+        if (tasks[a].submitTime != tasks[b].submitTime) return tasks[a].submitTime < tasks[b].submitTime;
+        return resourceNeed(a) > resourceNeed(b);
+    });
+
+    addOrder([&](int a, int b) {
+        if (tasks[a].submitTime != tasks[b].submitTime) return tasks[a].submitTime < tasks[b].submitTime;
+        if (tasks[a].runTime != tasks[b].runTime) return tasks[a].runTime < tasks[b].runTime;
+        if (tasks[a].priority != tasks[b].priority) return tasks[a].priority > tasks[b].priority;
+        return resourceNeed(a) > resourceNeed(b);
+    });
+
+    addOrder([&](int a, int b) {
+        if (feasibleCnt[a] != feasibleCnt[b]) return feasibleCnt[a] < feasibleCnt[b];
+        if (resourceNeed(a) != resourceNeed(b)) return resourceNeed(a) > resourceNeed(b);
+        if (tasks[a].priority != tasks[b].priority) return tasks[a].priority > tasks[b].priority;
+        return tasks[a].submitTime < tasks[b].submitTime;
+    });
+
+    addOrder([&](int a, int b) {
+        long long pressureA = resourceNeed(a) / max(1, feasibleCnt[a]);
+        long long pressureB = resourceNeed(b) / max(1, feasibleCnt[b]);
+        if (pressureA != pressureB) return pressureA > pressureB;
+        if (tasks[a].submitTime != tasks[b].submitTime) return tasks[a].submitTime < tasks[b].submitTime;
+        return tasks[a].priority > tasks[b].priority;
+    });
+
     sort(orders.begin(), orders.end());
     orders.erase(unique(orders.begin(), orders.end()), orders.end());
     return orders;
@@ -346,7 +503,7 @@ double normalizedScore(const Metrics& m, const Metrics& mn, const Metrics& mx) {
     long double idleN = norm(m.idleMem, mn.idleMem, mx.idleMem);
     long double finishN = norm(m.finish, mn.finish, mx.finish);
 
-    return (double)(0.45L * waitN + 0.25L * idleN + 0.30L * finishN);
+    return (double)(0.55L * waitN + 0.20L * idleN + 0.25L * finishN);
 }
 
 int main() {
@@ -373,6 +530,12 @@ int main() {
             >> tasks[i].priority;
     }
 
+    auto startClock = chrono::steady_clock::now();
+    auto elapsedSeconds = [&]() {
+        chrono::duration<double> diff = chrono::steady_clock::now() - startClock;
+        return diff.count();
+    };
+
     vector<vector<int>> orders = makeOrders();
     vector<ScoreWeight> weights = {
         {1000000, 10000, 100, 1},
@@ -380,13 +543,42 @@ int main() {
         {600000, 30000, 100, 1},
         {800000, 12000, 400, 3},
         {400000, 20000, 800, 6},
-        {2000000, 5000, 50, 1}
+        {2000000, 5000, 50, 1},
+        {3000000, 2000, 50, 1},
+        {1000000, 50000, 100, 1},
+        {300000, 60000, 300, 3},
+        {500000, 10000, 1500, 10},
+        {1200000, 15000, 30, 0},
+        {700000, 25000, 600, 2}
     };
 
     vector<Plan> plans;
-    for (int i = 0; i < (int)orders.size(); i++) {
+    vector<array<long double, 3>> localWeights = {
+        {1.0L, 300.0L, 50.0L}
+    };
+
+    bool useLocalSearch = (N <= 50);
+    bool stop = false;
+    for (int i = 0; i < (int)orders.size() && !stop; i++) {
         for (int j = 0; j < (int)weights.size(); j++) {
-            plans.push_back(buildPlan(orders[i], weights[j]));
+            if (elapsedSeconds() > 54.0) {
+                stop = true;
+                break;
+            }
+            Plan basePlan = buildPlan(orders[i], weights[j]);
+            plans.push_back(basePlan);
+            for (int k = 0; useLocalSearch && k < (int)localWeights.size(); k++) {
+                if (elapsedSeconds() > 54.0) {
+                    stop = true;
+                    break;
+                }
+                plans.push_back(improveByReinsert(
+                    basePlan,
+                    localWeights[k][0],
+                    localWeights[k][1],
+                    localWeights[k][2]
+                ));
+            }
         }
     }
 
