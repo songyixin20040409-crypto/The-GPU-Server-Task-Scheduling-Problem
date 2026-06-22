@@ -1,14 +1,10 @@
 #include <bits/stdc++.h>
 using namespace std;
 
-// 代码版本五：并发调度 + 任务排序 + 多候选开始时间 + 综合评分选方案
-// 每台服务器尝试多个候选时间：
-// submitTime、已有任务结束时间
-// 然后从所有可行方案中选评分最低的
 struct Server {
     int id;
     int gpu;
-    int gpuMem; // 单张 GPU 显存
+    int gpuMem;
     int cpu;
     int mem;
 };
@@ -25,20 +21,51 @@ struct Task {
 };
 
 struct RunningJob {
+    int taskId;
     int startTime;
     int finishTime;
     int useGpu;
     int useCpu;
     int useMem;
+    int useGpuMem;
 };
 
 struct Answer {
-    int taskId;
-    int serverId;
-    int startTime;
-    int useGpu;
-    int finishTime;
+    int taskId = 0;
+    int serverId = -1;
+    int startTime = 0;
+    int useGpu = 0;
+    int finishTime = 0;
 };
+
+struct Metrics {
+    long long wait = 0;
+    double idleMem = 0;
+    int finish = 0;
+};
+
+struct Plan {
+    vector<Answer> ans;
+    Metrics metrics;
+};
+
+struct ScoreWeight {
+    long long waitW;
+    long long finishW;
+    long long gpuWasteW;
+    long long resourceW;
+};
+
+int M, N;
+vector<Server> servers;
+vector<Task> tasks;
+
+long long resourceNeed(int i) {
+    return 1LL * tasks[i].needGpu * 1000000
+         + 1LL * tasks[i].needGpuMem * 1000
+         + 1LL * tasks[i].needCpu * 20
+         + tasks[i].needMem;
+}
 
 int calcNeedGpu(const Task& task, const Server& server) {
     int gpuByMem = (task.needGpuMem + server.gpuMem - 1) / server.gpuMem;
@@ -47,57 +74,7 @@ int calcNeedGpu(const Task& task, const Server& server) {
 
 bool canRunOnServer(const Task& task, const Server& server) {
     int needGpu = calcNeedGpu(task, server);
-
-    if (needGpu > server.gpu) return false;
-    if (task.needCpu > server.cpu) return false;
-    if (task.needMem > server.mem) return false;
-
-    return true;
-}
-
-bool canPlaceAtTime(
-    const Task& task,
-    const Server& server,
-    const vector<RunningJob>& jobs,
-    int startTime,
-    int useGpu
-) {
-    int finishTime = startTime + task.runTime;
-
-    vector<int> checkTimes;
-    checkTimes.push_back(startTime);
-
-    for (int i = 0; i < jobs.size(); i++) {
-        if (jobs[i].startTime >= startTime && jobs[i].startTime < finishTime) {
-            checkTimes.push_back(jobs[i].startTime);
-        }
-
-        if (jobs[i].finishTime > startTime && jobs[i].finishTime < finishTime) {
-            checkTimes.push_back(jobs[i].finishTime);
-        }
-    }
-
-    for (int k = 0; k < checkTimes.size(); k++) {
-        int now = checkTimes[k];
-
-        int usedGpu = 0;
-        int usedCpu = 0;
-        int usedMem = 0;
-
-        for (int i = 0; i < jobs.size(); i++) {
-            if (jobs[i].startTime <= now && now < jobs[i].finishTime) {
-                usedGpu += jobs[i].useGpu;
-                usedCpu += jobs[i].useCpu;
-                usedMem += jobs[i].useMem;
-            }
-        }
-
-        if (usedGpu + useGpu > server.gpu) return false;
-        if (usedCpu + task.needCpu > server.cpu) return false;
-        if (usedMem + task.needMem > server.mem) return false;
-    }
-
-    return true;
+    return needGpu <= server.gpu && task.needCpu <= server.cpu && task.needMem <= server.mem;
 }
 
 void getUsedResourceAtTime(
@@ -111,7 +88,7 @@ void getUsedResourceAtTime(
     usedCpu = 0;
     usedMem = 0;
 
-    for (int i = 0; i < jobs.size(); i++) {
+    for (int i = 0; i < (int)jobs.size(); i++) {
         if (jobs[i].startTime <= time && time < jobs[i].finishTime) {
             usedGpu += jobs[i].useGpu;
             usedCpu += jobs[i].useCpu;
@@ -120,16 +97,42 @@ void getUsedResourceAtTime(
     }
 }
 
-// 获取候选开始时间：任务提交时间 + 已有任务结束时间
-vector<int> getCandidateStartTimes(
+bool canPlaceAtTime(
     const Task& task,
-    const vector<RunningJob>& jobs
+    const Server& server,
+    const vector<RunningJob>& jobs,
+    int startTime,
+    int useGpu
 ) {
-    vector<int> candidateTimes;
+    int finishTime = startTime + task.runTime;
+    vector<int> checkTimes;
+    checkTimes.push_back(startTime);
 
+    for (int i = 0; i < (int)jobs.size(); i++) {
+        if (jobs[i].startTime >= startTime && jobs[i].startTime < finishTime) {
+            checkTimes.push_back(jobs[i].startTime);
+        }
+        if (jobs[i].finishTime > startTime && jobs[i].finishTime < finishTime) {
+            checkTimes.push_back(jobs[i].finishTime);
+        }
+    }
+
+    for (int k = 0; k < (int)checkTimes.size(); k++) {
+        int usedGpu, usedCpu, usedMem;
+        getUsedResourceAtTime(jobs, checkTimes[k], usedGpu, usedCpu, usedMem);
+        if (usedGpu + useGpu > server.gpu) return false;
+        if (usedCpu + task.needCpu > server.cpu) return false;
+        if (usedMem + task.needMem > server.mem) return false;
+    }
+
+    return true;
+}
+
+vector<int> getCandidateStartTimes(const Task& task, const vector<RunningJob>& jobs) {
+    vector<int> candidateTimes;
     candidateTimes.push_back(task.submitTime);
 
-    for (int i = 0; i < jobs.size(); i++) {
+    for (int i = 0; i < (int)jobs.size(); i++) {
         if (jobs[i].finishTime >= task.submitTime) {
             candidateTimes.push_back(jobs[i].finishTime);
         }
@@ -137,27 +140,228 @@ vector<int> getCandidateStartTimes(
 
     sort(candidateTimes.begin(), candidateTimes.end());
     candidateTimes.erase(unique(candidateTimes.begin(), candidateTimes.end()), candidateTimes.end());
-
     return candidateTimes;
+}
+
+Metrics evaluatePlan(const vector<Answer>& ans) {
+    Metrics m;
+    vector<vector<RunningJob>> jobs(M + 1);
+
+    for (int i = 1; i <= N; i++) {
+        const Answer& a = ans[i];
+        const Task& task = tasks[i];
+        m.wait += 1LL * task.priority * (a.startTime - task.submitTime);
+        m.finish = max(m.finish, a.finishTime);
+        jobs[a.serverId].push_back({
+            i,
+            a.startTime,
+            a.finishTime,
+            a.useGpu,
+            task.needCpu,
+            task.needMem,
+            task.needGpuMem
+        });
+    }
+
+    long long totalGpuMem = 0;
+    for (int s = 1; s <= M; s++) {
+        totalGpuMem += 1LL * servers[s].gpu * servers[s].gpuMem;
+    }
+
+    vector<int> events;
+    events.push_back(0);
+    events.push_back(m.finish);
+    for (int s = 1; s <= M; s++) {
+        for (int k = 0; k < (int)jobs[s].size(); k++) {
+            events.push_back(jobs[s][k].startTime);
+            events.push_back(jobs[s][k].finishTime);
+        }
+    }
+    sort(events.begin(), events.end());
+    events.erase(unique(events.begin(), events.end()), events.end());
+
+    long double idleArea = 0;
+    for (int e = 0; e + 1 < (int)events.size(); e++) {
+        int left = events[e];
+        int right = events[e + 1];
+        if (right <= left) continue;
+
+        long long usedTaskMem = 0;
+        for (int s = 1; s <= M; s++) {
+            for (int k = 0; k < (int)jobs[s].size(); k++) {
+                if (jobs[s][k].startTime <= left && left < jobs[s][k].finishTime) {
+                    usedTaskMem += jobs[s][k].useGpuMem;
+                }
+            }
+        }
+        idleArea += (long double)(totalGpuMem - usedTaskMem) * (right - left);
+    }
+
+    m.idleMem = m.finish > 0 ? (double)(idleArea / m.finish) : 0.0;
+    return m;
+}
+
+Plan buildPlan(vector<int> order, const ScoreWeight& w) {
+    vector<vector<RunningJob>> serverJobs(M + 1);
+    vector<Answer> ans(N + 1);
+
+    for (int idx = 0; idx < (int)order.size(); idx++) {
+        int i = order[idx];
+
+        int bestServer = -1;
+        int bestStartTime = INT_MAX;
+        int bestUseGpu = 0;
+        long long bestScore = (1LL << 62);
+
+        for (int s = 1; s <= M; s++) {
+            if (!canRunOnServer(tasks[i], servers[s])) continue;
+
+            int useGpu = calcNeedGpu(tasks[i], servers[s]);
+            vector<int> candidateTimes = getCandidateStartTimes(tasks[i], serverJobs[s]);
+
+            for (int p = 0; p < (int)candidateTimes.size(); p++) {
+                int startTime = candidateTimes[p];
+                if (!canPlaceAtTime(tasks[i], servers[s], serverJobs[s], startTime, useGpu)) {
+                    continue;
+                }
+
+                int finishTime = startTime + tasks[i].runTime;
+                int usedGpuNow, usedCpuNow, usedMemNow;
+                getUsedResourceAtTime(serverJobs[s], startTime, usedGpuNow, usedCpuNow, usedMemNow);
+
+                int leftGpu = servers[s].gpu - usedGpuNow - useGpu;
+                int leftCpu = servers[s].cpu - usedCpuNow - tasks[i].needCpu;
+                int leftMem = servers[s].mem - usedMemNow - tasks[i].needMem;
+
+                long long waitCost = 1LL * tasks[i].priority * (startTime - tasks[i].submitTime);
+                long long gpuMemWaste = 1LL * useGpu * servers[s].gpuMem - tasks[i].needGpuMem;
+                long long resourceWaste = 1LL * leftGpu * 1000 + 1LL * leftCpu * 10 + leftMem;
+
+                long long score =
+                    waitCost * w.waitW +
+                    1LL * finishTime * w.finishW +
+                    gpuMemWaste * w.gpuWasteW +
+                    resourceWaste * w.resourceW;
+
+                if (score < bestScore ||
+                    (score == bestScore && finishTime < bestStartTime + tasks[i].runTime)) {
+                    bestScore = score;
+                    bestServer = s;
+                    bestStartTime = startTime;
+                    bestUseGpu = useGpu;
+                }
+            }
+        }
+
+        int finishTime = bestStartTime + tasks[i].runTime;
+        ans[i] = {tasks[i].id, bestServer, bestStartTime, bestUseGpu, finishTime};
+
+        serverJobs[bestServer].push_back({
+            i,
+            bestStartTime,
+            finishTime,
+            bestUseGpu,
+            tasks[i].needCpu,
+            tasks[i].needMem,
+            tasks[i].needGpuMem
+        });
+    }
+
+    Plan plan;
+    plan.ans = ans;
+    plan.metrics = evaluatePlan(ans);
+    return plan;
+}
+
+vector<vector<int>> makeOrders() {
+    vector<vector<int>> orders;
+    vector<int> base;
+    for (int i = 1; i <= N; i++) base.push_back(i);
+
+    auto addOrder = [&](auto cmp) {
+        vector<int> ord = base;
+        stable_sort(ord.begin(), ord.end(), cmp);
+        orders.push_back(ord);
+    };
+
+    vector<int> feasibleCnt(N + 1, 0);
+    for (int i = 1; i <= N; i++) {
+        for (int s = 1; s <= M; s++) {
+            if (canRunOnServer(tasks[i], servers[s])) feasibleCnt[i]++;
+        }
+    }
+
+    addOrder([&](int a, int b) {
+        if (tasks[a].submitTime != tasks[b].submitTime) return tasks[a].submitTime < tasks[b].submitTime;
+        if (tasks[a].priority != tasks[b].priority) return tasks[a].priority > tasks[b].priority;
+        if (tasks[a].runTime != tasks[b].runTime) return tasks[a].runTime < tasks[b].runTime;
+        return resourceNeed(a) > resourceNeed(b);
+    });
+
+    addOrder([&](int a, int b) {
+        if (tasks[a].submitTime != tasks[b].submitTime) return tasks[a].submitTime < tasks[b].submitTime;
+        if (tasks[a].priority != tasks[b].priority) return tasks[a].priority > tasks[b].priority;
+        return resourceNeed(a) > resourceNeed(b);
+    });
+
+    addOrder([&](int a, int b) {
+        if (tasks[a].submitTime != tasks[b].submitTime) return tasks[a].submitTime < tasks[b].submitTime;
+        long long lhs = 1LL * tasks[a].priority * tasks[b].runTime;
+        long long rhs = 1LL * tasks[b].priority * tasks[a].runTime;
+        if (lhs != rhs) return lhs > rhs;
+        return resourceNeed(a) > resourceNeed(b);
+    });
+
+    addOrder([&](int a, int b) {
+        if (feasibleCnt[a] != feasibleCnt[b]) return feasibleCnt[a] < feasibleCnt[b];
+        if (tasks[a].submitTime != tasks[b].submitTime) return tasks[a].submitTime < tasks[b].submitTime;
+        if (tasks[a].priority != tasks[b].priority) return tasks[a].priority > tasks[b].priority;
+        return resourceNeed(a) > resourceNeed(b);
+    });
+
+    addOrder([&](int a, int b) {
+        if (tasks[a].priority != tasks[b].priority) return tasks[a].priority > tasks[b].priority;
+        if (tasks[a].submitTime != tasks[b].submitTime) return tasks[a].submitTime < tasks[b].submitTime;
+        return resourceNeed(a) > resourceNeed(b);
+    });
+
+    addOrder([&](int a, int b) {
+        if (resourceNeed(a) != resourceNeed(b)) return resourceNeed(a) > resourceNeed(b);
+        if (tasks[a].submitTime != tasks[b].submitTime) return tasks[a].submitTime < tasks[b].submitTime;
+        return tasks[a].priority > tasks[b].priority;
+    });
+
+    sort(orders.begin(), orders.end());
+    orders.erase(unique(orders.begin(), orders.end()), orders.end());
+    return orders;
+}
+
+double normalizedScore(const Metrics& m, const Metrics& mn, const Metrics& mx) {
+    auto norm = [](long double x, long double lo, long double hi) {
+        if (fabsl(hi - lo) < 1e-12L) return 0.0L;
+        return (x - lo) / (hi - lo);
+    };
+
+    long double waitN = norm(m.wait, mn.wait, mx.wait);
+    long double idleN = norm(m.idleMem, mn.idleMem, mx.idleMem);
+    long double finishN = norm(m.finish, mn.finish, mx.finish);
+
+    return (double)(0.45L * waitN + 0.25L * idleN + 0.30L * finishN);
 }
 
 int main() {
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
 
-    int M, N;
     cin >> M >> N;
+    servers.assign(M + 1, Server());
+    tasks.assign(N + 1, Task());
 
-    vector<Server> servers(M + 1);
     for (int i = 1; i <= M; i++) {
         servers[i].id = i;
-        cin >> servers[i].gpu
-            >> servers[i].gpuMem
-            >> servers[i].cpu
-            >> servers[i].mem;
+        cin >> servers[i].gpu >> servers[i].gpuMem >> servers[i].cpu >> servers[i].mem;
     }
 
-    vector<Task> tasks(N + 1);
     for (int i = 1; i <= N; i++) {
         tasks[i].id = i;
         cin >> tasks[i].submitTime
@@ -169,124 +373,46 @@ int main() {
             >> tasks[i].priority;
     }
 
-    vector<int> order;
-    for (int i = 1; i <= N; i++) {
-        order.push_back(i);
+    vector<vector<int>> orders = makeOrders();
+    vector<ScoreWeight> weights = {
+        {1000000, 10000, 100, 1},
+        {1500000, 8000, 80, 1},
+        {600000, 30000, 100, 1},
+        {800000, 12000, 400, 3},
+        {400000, 20000, 800, 6},
+        {2000000, 5000, 50, 1}
+    };
+
+    vector<Plan> plans;
+    for (int i = 0; i < (int)orders.size(); i++) {
+        for (int j = 0; j < (int)weights.size(); j++) {
+            plans.push_back(buildPlan(orders[i], weights[j]));
+        }
     }
 
-    sort(order.begin(), order.end(), [&](int a, int b) {
-        if (tasks[a].submitTime != tasks[b].submitTime) {
-            return tasks[a].submitTime < tasks[b].submitTime;
-        }
+    Metrics mn = plans[0].metrics;
+    Metrics mx = plans[0].metrics;
+    for (int i = 1; i < (int)plans.size(); i++) {
+        mn.wait = min(mn.wait, plans[i].metrics.wait);
+        mn.idleMem = min(mn.idleMem, plans[i].metrics.idleMem);
+        mn.finish = min(mn.finish, plans[i].metrics.finish);
 
-        if (tasks[a].priority != tasks[b].priority) {
-            return tasks[a].priority > tasks[b].priority;
-        }
-
-        if (tasks[a].runTime != tasks[b].runTime) {
-            return tasks[a].runTime < tasks[b].runTime;
-        }
-
-        long long resourceA =
-            1LL * tasks[a].needGpu * 1000000 +
-            1LL * tasks[a].needGpuMem * 1000 +
-            1LL * tasks[a].needCpu * 10 +
-            tasks[a].needMem;
-
-        long long resourceB =
-            1LL * tasks[b].needGpu * 1000000 +
-            1LL * tasks[b].needGpuMem * 1000 +
-            1LL * tasks[b].needCpu * 10 +
-            tasks[b].needMem;
-
-        return resourceA > resourceB;
-    });
-
-    vector<vector<RunningJob>> serverJobs(M + 1);
-    vector<Answer> ans(N + 1);
-
-    for (int idx = 0; idx < order.size(); idx++) {
-        int i = order[idx];
-
-        int bestServer = -1;
-        int bestStartTime = 1e9;
-        int bestUseGpu = 0;
-        long long bestScore = (1LL << 62);
-
-        for (int j = 1; j <= M; j++) {
-            if (!canRunOnServer(tasks[i], servers[j])) {
-                continue;
-            }
-
-            int useGpu = calcNeedGpu(tasks[i], servers[j]);
-
-            vector<int> candidateTimes = getCandidateStartTimes(
-                tasks[i],
-                serverJobs[j]
-            );
-
-            for (int t = 0; t < candidateTimes.size(); t++) {
-                int startTime = candidateTimes[t];
-
-                if (!canPlaceAtTime(tasks[i], servers[j], serverJobs[j], startTime, useGpu)) {
-                    continue;
-                }
-
-                int finishTime = startTime + tasks[i].runTime;
-
-                int usedGpuNow, usedCpuNow, usedMemNow;
-                getUsedResourceAtTime(
-                    serverJobs[j],
-                    startTime,
-                    usedGpuNow,
-                    usedCpuNow,
-                    usedMemNow
-                );
-
-                int leftGpu = servers[j].gpu - usedGpuNow - useGpu;
-                int leftCpu = servers[j].cpu - usedCpuNow - tasks[i].needCpu;
-                int leftMem = servers[j].mem - usedMemNow - tasks[i].needMem;
-
-                long long waitCost = 1LL * tasks[i].priority * (startTime - tasks[i].submitTime);
-                long long finishCost = finishTime;
-                long long gpuMemWaste = 1LL * useGpu * servers[j].gpuMem - tasks[i].needGpuMem;
-                long long resourceWaste = 1LL * leftGpu * 1000 + 1LL * leftCpu * 10 + leftMem;
-
-                long long score =
-                    waitCost * 1000000LL +
-                    finishCost * 10000LL +
-                    gpuMemWaste * 100LL +
-                    resourceWaste;
-
-                if (score < bestScore) {
-                    bestScore = score;
-                    bestServer = j;
-                    bestStartTime = startTime;
-                    bestUseGpu = useGpu;
-                }
-            }
-        }
-
-        int finishTime = bestStartTime + tasks[i].runTime;
-
-        ans[i] = {
-            tasks[i].id,
-            bestServer,
-            bestStartTime,
-            bestUseGpu,
-            finishTime
-        };
-
-        RunningJob job;
-        job.startTime = bestStartTime;
-        job.finishTime = finishTime;
-        job.useGpu = bestUseGpu;
-        job.useCpu = tasks[i].needCpu;
-        job.useMem = tasks[i].needMem;
-
-        serverJobs[bestServer].push_back(job);
+        mx.wait = max(mx.wait, plans[i].metrics.wait);
+        mx.idleMem = max(mx.idleMem, plans[i].metrics.idleMem);
+        mx.finish = max(mx.finish, plans[i].metrics.finish);
     }
 
+    int best = 0;
+    double bestValue = normalizedScore(plans[0].metrics, mn, mx);
+    for (int i = 1; i < (int)plans.size(); i++) {
+        double value = normalizedScore(plans[i].metrics, mn, mx);
+        if (value < bestValue) {
+            bestValue = value;
+            best = i;
+        }
+    }
+
+    const vector<Answer>& ans = plans[best].ans;
     for (int i = 1; i <= N; i++) {
         cout << ans[i].taskId << " "
              << ans[i].serverId << " "
