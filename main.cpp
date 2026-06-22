@@ -110,24 +110,52 @@ bool canPlaceAtTime(
     int useGpu
 ) {
     int finishTime = startTime + task.runTime;
-    vector<int> checkTimes;
-    checkTimes.push_back(startTime);
+
+    struct Event {
+        int time;
+        int gpu;
+        int cpu;
+        int mem;
+    };
+
+    vector<Event> events;
+    events.reserve(jobs.size() * 2 + 2);
+    events.push_back({startTime, 0, 0, 0});
+    events.push_back({finishTime, 0, 0, 0});
 
     for (int i = 0; i < (int)jobs.size(); i++) {
-        if (jobs[i].startTime >= startTime && jobs[i].startTime < finishTime) {
-            checkTimes.push_back(jobs[i].startTime);
-        }
-        if (jobs[i].finishTime > startTime && jobs[i].finishTime < finishTime) {
-            checkTimes.push_back(jobs[i].finishTime);
+        if (jobs[i].startTime < finishTime && jobs[i].finishTime > startTime) {
+            int l = max(startTime, jobs[i].startTime);
+            int r = min(finishTime, jobs[i].finishTime);
+            events.push_back({l, jobs[i].useGpu, jobs[i].useCpu, jobs[i].useMem});
+            events.push_back({r, -jobs[i].useGpu, -jobs[i].useCpu, -jobs[i].useMem});
         }
     }
 
-    for (int k = 0; k < (int)checkTimes.size(); k++) {
-        int usedGpu, usedCpu, usedMem;
-        getUsedResourceAtTime(jobs, checkTimes[k], usedGpu, usedCpu, usedMem);
-        if (usedGpu + useGpu > server.gpu) return false;
-        if (usedCpu + task.needCpu > server.cpu) return false;
-        if (usedMem + task.needMem > server.mem) return false;
+    sort(events.begin(), events.end(), [](const Event& a, const Event& b) {
+        return a.time < b.time;
+    });
+
+    int usedGpu = 0;
+    int usedCpu = 0;
+    int usedMem = 0;
+    int idx = 0;
+
+    while (idx < (int)events.size()) {
+        int now = events[idx].time;
+        while (idx < (int)events.size() && events[idx].time == now) {
+            usedGpu += events[idx].gpu;
+            usedCpu += events[idx].cpu;
+            usedMem += events[idx].mem;
+            idx++;
+        }
+
+        int nextTime = (idx < (int)events.size() ? events[idx].time : finishTime);
+        if (now < finishTime && nextTime > now) {
+            if (usedGpu + useGpu > server.gpu) return false;
+            if (usedCpu + task.needCpu > server.cpu) return false;
+            if (usedMem + task.needMem > server.mem) return false;
+        }
     }
 
     return true;
@@ -196,7 +224,7 @@ vector<int> getCandidateStartTimes(const Task& task, const vector<RunningJob>& j
     sort(candidateTimes.begin(), candidateTimes.end());
     candidateTimes.erase(unique(candidateTimes.begin(), candidateTimes.end()), candidateTimes.end());
 
-    int cap = (N > 1200 ? 90 : (N > 700 ? 130 : (N > 350 ? 180 : 1000000000)));
+    int cap = (N > 4000 ? 25 : (N > 3000 ? 30 : (N > 2500 ? 50 : (N > 1200 ? 90 : (N > 700 ? 130 : (N > 350 ? 180 : 1000000000))))));
     if ((int)candidateTimes.size() > cap) {
         vector<int> reduced;
         int frontKeep = cap * 3 / 4;
@@ -625,6 +653,77 @@ int main() {
         {4000000, 5000, 50, 1, 0},
         {2500000, 10000, 80, 1, 1}
     };
+
+    if (N > 4000) {
+        vector<vector<int>> fastOrders;
+        vector<int> keep = {0, 1, 3, 4};
+        for (int idx : keep) {
+            if (0 <= idx && idx < (int)orders.size()) {
+                fastOrders.push_back(orders[idx]);
+            }
+        }
+        if (!fastOrders.empty()) {
+            orders = fastOrders;
+        }
+
+        weights = {
+            {1000000, 10000, 100, 1, 0},
+            {2000000, 5000, 50, 1, 0},
+            {3000000, 2000, 50, 1, 0},
+            {4000000, 5000, 50, 1, 0}
+        };
+    } else if (N > 3000) {
+        vector<vector<int>> fastOrders;
+        vector<int> keep = {0, 1, 2, 3, 4};
+        for (int idx : keep) {
+            if (0 <= idx && idx < (int)orders.size()) {
+                fastOrders.push_back(orders[idx]);
+            }
+        }
+        if (!fastOrders.empty()) {
+            orders = fastOrders;
+        }
+
+        weights = {
+            {1000000, 10000, 100, 1, 0},
+            {1500000, 8000, 80, 1, 0},
+            {2000000, 5000, 50, 1, 0},
+            {3000000, 2000, 50, 1, 0},
+            {1000000, 50000, 100, 1, 0}
+        };
+    } else if (N > 2500) {
+        vector<vector<int>> fastOrders;
+        vector<int> keep = {0, 1, 2, 3, 4, 5, 8, 9};
+        for (int idx : keep) {
+            if (0 <= idx && idx < (int)orders.size()) {
+                fastOrders.push_back(orders[idx]);
+            }
+        }
+        if (!fastOrders.empty()) {
+            orders = fastOrders;
+        }
+
+        weights = {
+            {1000000, 10000, 100, 1, 0},
+            {1500000, 8000, 80, 1, 0},
+            {2000000, 5000, 50, 1, 0},
+            {3000000, 2000, 50, 1, 0},
+            {1000000, 50000, 100, 1, 0},
+            {1200000, 15000, 30, 0, 0},
+            {4000000, 5000, 50, 1, 0}
+        };
+    } else if (N > 1200) {
+        vector<vector<int>> mediumOrders;
+        vector<int> keep = {0, 1, 2, 3, 4, 5, 8, 9};
+        for (int idx : keep) {
+            if (0 <= idx && idx < (int)orders.size()) {
+                mediumOrders.push_back(orders[idx]);
+            }
+        }
+        if (!mediumOrders.empty()) {
+            orders = mediumOrders;
+        }
+    }
 
     vector<Plan> plans;
     vector<array<long double, 3>> localWeights = {
