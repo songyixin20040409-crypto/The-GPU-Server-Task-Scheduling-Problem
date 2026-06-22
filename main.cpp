@@ -1,12 +1,10 @@
 #include <bits/stdc++.h>
 using namespace std;
 
-// 代码版本四：并发调度 + 任务排序 + 综合评分选服务器
-// 等待时间
-// 完成时间
-// 显存浪费
-// 服务器剩余资源
-
+// 代码版本五：并发调度 + 任务排序 + 多候选开始时间 + 综合评分选方案
+// 每台服务器尝试多个候选时间：
+// submitTime、已有任务结束时间
+// 然后从所有可行方案中选评分最低的
 struct Server {
     int id;
     int gpu;
@@ -102,35 +100,6 @@ bool canPlaceAtTime(
     return true;
 }
 
-int findEarliestStartTime(
-    const Task& task,
-    const Server& server,
-    const vector<RunningJob>& jobs,
-    int useGpu
-) {
-    vector<int> candidateTimes;
-    candidateTimes.push_back(task.submitTime);
-
-    for (int i = 0; i < jobs.size(); i++) {
-        if (jobs[i].finishTime >= task.submitTime) {
-            candidateTimes.push_back(jobs[i].finishTime);
-        }
-    }
-
-    sort(candidateTimes.begin(), candidateTimes.end());
-    candidateTimes.erase(unique(candidateTimes.begin(), candidateTimes.end()), candidateTimes.end());
-
-    for (int i = 0; i < candidateTimes.size(); i++) {
-        int startTime = candidateTimes[i];
-
-        if (canPlaceAtTime(task, server, jobs, startTime, useGpu)) {
-            return startTime;
-        }
-    }
-
-    return candidateTimes.back();
-}
-
 void getUsedResourceAtTime(
     const vector<RunningJob>& jobs,
     int time,
@@ -149,6 +118,27 @@ void getUsedResourceAtTime(
             usedMem += jobs[i].useMem;
         }
     }
+}
+
+// 获取候选开始时间：任务提交时间 + 已有任务结束时间
+vector<int> getCandidateStartTimes(
+    const Task& task,
+    const vector<RunningJob>& jobs
+) {
+    vector<int> candidateTimes;
+
+    candidateTimes.push_back(task.submitTime);
+
+    for (int i = 0; i < jobs.size(); i++) {
+        if (jobs[i].finishTime >= task.submitTime) {
+            candidateTimes.push_back(jobs[i].finishTime);
+        }
+    }
+
+    sort(candidateTimes.begin(), candidateTimes.end());
+    candidateTimes.erase(unique(candidateTimes.begin(), candidateTimes.end()), candidateTimes.end());
+
+    return candidateTimes;
 }
 
 int main() {
@@ -230,44 +220,50 @@ int main() {
 
             int useGpu = calcNeedGpu(tasks[i], servers[j]);
 
-            int startTime = findEarliestStartTime(
+            vector<int> candidateTimes = getCandidateStartTimes(
                 tasks[i],
-                servers[j],
-                serverJobs[j],
-                useGpu
+                serverJobs[j]
             );
 
-            int finishTime = startTime + tasks[i].runTime;
+            for (int t = 0; t < candidateTimes.size(); t++) {
+                int startTime = candidateTimes[t];
 
-            int usedGpuNow, usedCpuNow, usedMemNow;
-            getUsedResourceAtTime(
-                serverJobs[j],
-                startTime,
-                usedGpuNow,
-                usedCpuNow,
-                usedMemNow
-            );
+                if (!canPlaceAtTime(tasks[i], servers[j], serverJobs[j], startTime, useGpu)) {
+                    continue;
+                }
 
-            int leftGpu = servers[j].gpu - usedGpuNow - useGpu;
-            int leftCpu = servers[j].cpu - usedCpuNow - tasks[i].needCpu;
-            int leftMem = servers[j].mem - usedMemNow - tasks[i].needMem;
+                int finishTime = startTime + tasks[i].runTime;
 
-            long long waitCost = 1LL * tasks[i].priority * (startTime - tasks[i].submitTime);
-            long long finishCost = finishTime;
-            long long gpuMemWaste = 1LL * useGpu * servers[j].gpuMem - tasks[i].needGpuMem;
-            long long resourceWaste = 1LL * leftGpu * 1000 + 1LL * leftCpu * 10 + leftMem;
+                int usedGpuNow, usedCpuNow, usedMemNow;
+                getUsedResourceAtTime(
+                    serverJobs[j],
+                    startTime,
+                    usedGpuNow,
+                    usedCpuNow,
+                    usedMemNow
+                );
 
-            long long score =
-                waitCost * 1000000LL +
-                finishCost * 10000LL +
-                gpuMemWaste * 100LL +
-                resourceWaste;
+                int leftGpu = servers[j].gpu - usedGpuNow - useGpu;
+                int leftCpu = servers[j].cpu - usedCpuNow - tasks[i].needCpu;
+                int leftMem = servers[j].mem - usedMemNow - tasks[i].needMem;
 
-            if (score < bestScore) {
-                bestScore = score;
-                bestServer = j;
-                bestStartTime = startTime;
-                bestUseGpu = useGpu;
+                long long waitCost = 1LL * tasks[i].priority * (startTime - tasks[i].submitTime);
+                long long finishCost = finishTime;
+                long long gpuMemWaste = 1LL * useGpu * servers[j].gpuMem - tasks[i].needGpuMem;
+                long long resourceWaste = 1LL * leftGpu * 1000 + 1LL * leftCpu * 10 + leftMem;
+
+                long long score =
+                    waitCost * 1000000LL +
+                    finishCost * 10000LL +
+                    gpuMemWaste * 100LL +
+                    resourceWaste;
+
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestServer = j;
+                    bestStartTime = startTime;
+                    bestUseGpu = useGpu;
+                }
             }
         }
 
