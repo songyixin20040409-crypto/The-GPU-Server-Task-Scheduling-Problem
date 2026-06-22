@@ -54,6 +54,7 @@ struct ScoreWeight {
     long long finishW;
     long long gpuWasteW;
     long long resourceW;
+    int mode;
 };
 
 long double localObjective(const Metrics& m, long double waitW, long double idleW, long double finishW) {
@@ -130,6 +131,56 @@ bool canPlaceAtTime(
     }
 
     return true;
+}
+
+long long calcIntervalResourceWaste(
+    const Task& task,
+    const Server& server,
+    const vector<RunningJob>& jobs,
+    int startTime,
+    int useGpu
+) {
+    int finishTime = startTime + task.runTime;
+    vector<int> checkTimes;
+    checkTimes.push_back(startTime);
+    checkTimes.push_back(finishTime);
+
+    for (int i = 0; i < (int)jobs.size(); i++) {
+        if (jobs[i].startTime > startTime && jobs[i].startTime < finishTime) {
+            checkTimes.push_back(jobs[i].startTime);
+        }
+        if (jobs[i].finishTime > startTime && jobs[i].finishTime < finishTime) {
+            checkTimes.push_back(jobs[i].finishTime);
+        }
+    }
+
+    sort(checkTimes.begin(), checkTimes.end());
+    checkTimes.erase(unique(checkTimes.begin(), checkTimes.end()), checkTimes.end());
+
+    long long totalWaste = 0;
+    long long totalSpan = 0;
+
+    for (int i = 0; i + 1 < (int)checkTimes.size(); i++) {
+        int now = checkTimes[i];
+        int nextTime = checkTimes[i + 1];
+        if (nextTime <= now) continue;
+
+        int usedGpu, usedCpu, usedMem;
+        getUsedResourceAtTime(jobs, now, usedGpu, usedCpu, usedMem);
+
+        int leftGpu = server.gpu - usedGpu - useGpu;
+        int leftCpu = server.cpu - usedCpu - task.needCpu;
+        int leftMem = server.mem - usedMem - task.needMem;
+
+        long long span = nextTime - now;
+        long long waste = 1LL * leftGpu * 1000 + 1LL * leftCpu * 10 + leftMem;
+
+        totalWaste += waste * span;
+        totalSpan += span;
+    }
+
+    if (totalSpan == 0) return 0;
+    return totalWaste / totalSpan;
 }
 
 vector<int> getCandidateStartTimes(const Task& task, const vector<RunningJob>& jobs) {
@@ -240,6 +291,15 @@ Plan buildPlan(vector<int> order, const ScoreWeight& w) {
                 long long waitCost = 1LL * tasks[i].priority * (startTime - tasks[i].submitTime);
                 long long gpuMemWaste = 1LL * useGpu * servers[s].gpuMem - tasks[i].needGpuMem;
                 long long resourceWaste = 1LL * leftGpu * 1000 + 1LL * leftCpu * 10 + leftMem;
+                if (w.mode == 1) {
+                    resourceWaste = calcIntervalResourceWaste(
+                        tasks[i],
+                        servers[s],
+                        serverJobs[s],
+                        startTime,
+                        useGpu
+                    );
+                }
 
                 long long score =
                     waitCost * w.waitW +
@@ -538,18 +598,23 @@ int main() {
 
     vector<vector<int>> orders = makeOrders();
     vector<ScoreWeight> weights = {
-        {1000000, 10000, 100, 1},
-        {1500000, 8000, 80, 1},
-        {600000, 30000, 100, 1},
-        {800000, 12000, 400, 3},
-        {400000, 20000, 800, 6},
-        {2000000, 5000, 50, 1},
-        {3000000, 2000, 50, 1},
-        {1000000, 50000, 100, 1},
-        {300000, 60000, 300, 3},
-        {500000, 10000, 1500, 10},
-        {1200000, 15000, 30, 0},
-        {700000, 25000, 600, 2}
+        {1000000, 10000, 100, 1, 0},
+        {1500000, 8000, 80, 1, 0},
+        {600000, 30000, 100, 1, 0},
+        {800000, 12000, 400, 3, 0},
+        {400000, 20000, 800, 6, 0},
+        {2000000, 5000, 50, 1, 0},
+        {3000000, 2000, 50, 1, 0},
+        {1000000, 50000, 100, 1, 0},
+        {300000, 60000, 300, 3, 0},
+        {500000, 10000, 1500, 10, 0},
+        {1200000, 15000, 30, 0, 0},
+        {700000, 25000, 600, 2, 0},
+        {1000000, 10000, 100, 1, 1},
+        {1500000, 8000, 80, 1, 1},
+        {800000, 12000, 400, 3, 1},
+        {500000, 10000, 1500, 10, 1},
+        {700000, 25000, 600, 2, 1}
     };
 
     vector<Plan> plans;
