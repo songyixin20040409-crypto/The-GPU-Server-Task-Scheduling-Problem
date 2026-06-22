@@ -1,6 +1,7 @@
 #include <bits/stdc++.h>
 using namespace std;
-//代码版本一 一台服务器同一时间运行一个任务
+//代码版本二 一台服务器可以同时跑多个任务 只要 GPU / CPU / 内存 都不超过上限
+
 struct Server {
     int id;
     int gpu;
@@ -20,6 +21,13 @@ struct Task {
     int priority;
 };
 
+struct RunningJob {
+    int startTime;
+    int finishTime;
+    int useGpu;
+    int useCpu;
+    int useMem;
+};
 
 struct Answer {
     int taskId;
@@ -50,6 +58,80 @@ bool canRunOnServer(const Task& task, const Server& server) {
 }
 
 
+bool canPlaceAtTime(
+    const Task& task,
+    const Server& server,
+    const vector<RunningJob>& jobs,
+    int startTime,
+    int useGpu
+) {
+    int finishTime = startTime + task.runTime;
+
+    vector<int> checkTimes;
+    checkTimes.push_back(startTime);
+
+    for (int i = 0; i < jobs.size(); i++) {
+        if (jobs[i].startTime >= startTime && jobs[i].startTime < finishTime) {
+            checkTimes.push_back(jobs[i].startTime);
+        }
+        if (jobs[i].finishTime > startTime && jobs[i].finishTime < finishTime) {
+            checkTimes.push_back(jobs[i].finishTime);
+        }
+    }
+
+    for (int k = 0; k < checkTimes.size(); k++) {
+        int now = checkTimes[k];
+
+        int usedGpu = 0;
+        int usedCpu = 0;
+        int usedMem = 0;
+
+        for (int i = 0; i < jobs.size(); i++) {
+            if (jobs[i].startTime <= now && now < jobs[i].finishTime) {
+                usedGpu += jobs[i].useGpu;
+                usedCpu += jobs[i].useCpu;
+                usedMem += jobs[i].useMem;
+            }
+        }
+
+        if (usedGpu + useGpu > server.gpu) return false;
+        if (usedCpu + task.needCpu > server.cpu) return false;
+        if (usedMem + task.needMem > server.mem) return false;
+    }
+
+    return true;
+}
+
+
+int findEarliestStartTime(
+    const Task& task,
+    const Server& server,
+    const vector<RunningJob>& jobs,
+    int useGpu
+) {
+    vector<int> candidateTimes;
+
+    candidateTimes.push_back(task.submitTime);
+
+    for (int i = 0; i < jobs.size(); i++) {
+        if (jobs[i].finishTime >= task.submitTime) {
+            candidateTimes.push_back(jobs[i].finishTime);
+        }
+    }
+
+    sort(candidateTimes.begin(), candidateTimes.end());
+    candidateTimes.erase(unique(candidateTimes.begin(), candidateTimes.end()), candidateTimes.end());
+
+    for (int i = 0; i < candidateTimes.size(); i++) {
+        int startTime = candidateTimes[i];
+
+        if (canPlaceAtTime(task, server, jobs, startTime, useGpu)) {
+            return startTime;
+        }
+    }
+
+    return candidateTimes.back();
+}
 
 
 int main() {
@@ -82,41 +164,53 @@ int main() {
 
 
 
-    vector<int> serverEndTime(M + 1, 0);
+    vector<vector<RunningJob>> serverJobs(M + 1);
     vector<Answer> ans(N + 1);
-
     for (int i = 1; i <= N; i++) {
-        int bestServer = -1;
-        int bestStartTime = 1e9;
-        int bestUseGpu = 0;
+    int bestServer = -1;
+    int bestStartTime = 1e9;
+    int bestUseGpu = 0;
 
-        for (int j = 1; j <= M; j++) {
-            if (!canRunOnServer(tasks[i], servers[j])) {
-                continue;
-            }
-
-            int useGpu = calcNeedGpu(tasks[i], servers[j]);
-            int startTime = max(tasks[i].submitTime, serverEndTime[j]);
-
-            if (startTime < bestStartTime) {
-                bestStartTime = startTime;
-                bestServer = j;
-                bestUseGpu = useGpu;
-            }
+    for (int j = 1; j <= M; j++) {
+        if (!canRunOnServer(tasks[i], servers[j])) {
+            continue;
         }
 
-        int finishTime = bestStartTime + tasks[i].runTime;
+        int useGpu = calcNeedGpu(tasks[i], servers[j]);
 
-        ans[i] = {
-            tasks[i].id,
-            bestServer,
-            bestStartTime,
-            bestUseGpu,
-            finishTime
-        };
+        int startTime = findEarliestStartTime(
+            tasks[i],
+            servers[j],
+            serverJobs[j],
+            useGpu
+        );
 
-        serverEndTime[bestServer] = finishTime;
+        if (startTime < bestStartTime) {
+            bestStartTime = startTime;
+            bestServer = j;
+            bestUseGpu = useGpu;
+        }
     }
+
+    int finishTime = bestStartTime + tasks[i].runTime;
+
+    ans[i] = {
+        tasks[i].id,
+        bestServer,
+        bestStartTime,
+        bestUseGpu,
+        finishTime
+    };
+
+    RunningJob job;
+    job.startTime = bestStartTime;
+    job.finishTime = finishTime;
+    job.useGpu = bestUseGpu;
+    job.useCpu = tasks[i].needCpu;
+    job.useMem = tasks[i].needMem;
+
+    serverJobs[bestServer].push_back(job);
+}
 
     for (int i = 1; i <= N; i++) {
         cout << ans[i].taskId << " "
@@ -126,9 +220,11 @@ int main() {
              << ans[i].finishTime << "\n";
     }
 
-    
     return 0;
 }
+
+
+
 
 
 //遍历每一个任务，每个任务都尝试所有服务器，计算最优开始时间、最优服务器、GPU使用量和完成时间，最后用 ans 数组存储每个任务的调度结果
