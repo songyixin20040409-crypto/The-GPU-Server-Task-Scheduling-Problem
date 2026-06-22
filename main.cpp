@@ -195,61 +195,67 @@ vector<int> getCandidateStartTimes(const Task& task, const vector<RunningJob>& j
 
     sort(candidateTimes.begin(), candidateTimes.end());
     candidateTimes.erase(unique(candidateTimes.begin(), candidateTimes.end()), candidateTimes.end());
+
+    int cap = (N > 1200 ? 90 : (N > 700 ? 130 : (N > 350 ? 180 : 1000000000)));
+    if ((int)candidateTimes.size() > cap) {
+        vector<int> reduced;
+        int frontKeep = cap * 3 / 4;
+        int backKeep = cap - frontKeep;
+        for (int i = 0; i < frontKeep && i < (int)candidateTimes.size(); i++) {
+            reduced.push_back(candidateTimes[i]);
+        }
+        for (int i = max(frontKeep, (int)candidateTimes.size() - backKeep); i < (int)candidateTimes.size(); i++) {
+            reduced.push_back(candidateTimes[i]);
+        }
+        sort(reduced.begin(), reduced.end());
+        reduced.erase(unique(reduced.begin(), reduced.end()), reduced.end());
+        return reduced;
+    }
+
     return candidateTimes;
 }
 
 Metrics evaluatePlan(const vector<Answer>& ans) {
     Metrics m;
-    vector<vector<RunningJob>> jobs(M + 1);
+    long long totalGpuMem = 0;
+    for (int s = 1; s <= M; s++) {
+        totalGpuMem += 1LL * servers[s].gpu * servers[s].gpuMem;
+    }
+
+    vector<pair<int, long long>> events;
+    events.reserve(N * 2 + 2);
 
     for (int i = 1; i <= N; i++) {
         const Answer& a = ans[i];
         const Task& task = tasks[i];
         m.wait += 1LL * task.priority * (a.startTime - task.submitTime);
         m.finish = max(m.finish, a.finishTime);
-        jobs[a.serverId].push_back({
-            i,
-            a.startTime,
-            a.finishTime,
-            a.useGpu,
-            task.needCpu,
-            task.needMem,
-            task.needGpuMem
-        });
+        events.push_back({a.startTime, task.needGpuMem});
+        events.push_back({a.finishTime, -1LL * task.needGpuMem});
     }
 
-    long long totalGpuMem = 0;
-    for (int s = 1; s <= M; s++) {
-        totalGpuMem += 1LL * servers[s].gpu * servers[s].gpuMem;
-    }
-
-    vector<int> events;
-    events.push_back(0);
-    events.push_back(m.finish);
-    for (int s = 1; s <= M; s++) {
-        for (int k = 0; k < (int)jobs[s].size(); k++) {
-            events.push_back(jobs[s][k].startTime);
-            events.push_back(jobs[s][k].finishTime);
-        }
-    }
     sort(events.begin(), events.end());
-    events.erase(unique(events.begin(), events.end()), events.end());
 
     long double idleArea = 0;
-    for (int e = 0; e + 1 < (int)events.size(); e++) {
-        int left = events[e];
-        int right = events[e + 1];
-        if (right <= left) continue;
+    long long usedGpuMem = 0;
+    int prevTime = 0;
+    int idx = 0;
 
-        long long usedTaskMem = 0;
-        for (int s = 1; s <= M; s++) {
-            for (int k = 0; k < (int)jobs[s].size(); k++) {
-                if (jobs[s][k].startTime <= left && left < jobs[s][k].finishTime) {
-                    usedTaskMem += jobs[s][k].useGpuMem;
-                }
-            }
+    while (idx < (int)events.size()) {
+        int now = events[idx].first;
+        if (now > prevTime) {
+            idleArea += (long double)(totalGpuMem - usedGpuMem) * (now - prevTime);
+            prevTime = now;
         }
-        idleArea += (long double)(totalGpuMem - usedTaskMem) * (right - left);
+
+        while (idx < (int)events.size() && events[idx].first == now) {
+            usedGpuMem += events[idx].second;
+            idx++;
+        }
+    }
+
+    if (m.finish > prevTime) {
+        idleArea += (long double)(totalGpuMem - usedGpuMem) * (m.finish - prevTime);
     }
 
     m.idleMem = m.finish > 0 ? (double)(idleArea / m.finish) : 0.0;
