@@ -563,7 +563,7 @@ double normalizedScore(const Metrics& m, const Metrics& mn, const Metrics& mx) {
     long double idleN = norm(m.idleMem, mn.idleMem, mx.idleMem);
     long double finishN = norm(m.finish, mn.finish, mx.finish);
 
-    return (double)(0.55L * waitN + 0.20L * idleN + 0.25L * finishN);
+    return (double)(0.70L * waitN + 0.12L * idleN + 0.18L * finishN);
 }
 
 int main() {
@@ -614,7 +614,10 @@ int main() {
         {1500000, 8000, 80, 1, 1},
         {800000, 12000, 400, 3, 1},
         {500000, 10000, 1500, 10, 1},
-        {700000, 25000, 600, 2, 1}
+        {700000, 25000, 600, 2, 1},
+        {5000000, 1000, 20, 0, 0},
+        {4000000, 5000, 50, 1, 0},
+        {2500000, 10000, 80, 1, 1}
     };
 
     vector<Plan> plans;
